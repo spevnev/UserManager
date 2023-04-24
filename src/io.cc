@@ -12,7 +12,7 @@ using namespace Napi;
 class IO : public Addon<IO> {
 private:
     int fd;
-    uint32_t entries, nextEntryOffset;
+    uint32_t entries, nextEntryOffset, pages;
 
     void initMetadata() {
         lseek(fd, 0, SEEK_SET);
@@ -20,12 +20,15 @@ private:
         write(fd, &entries, sizeof(entries));
         nextEntryOffset = PAGE_SIZE + PAGE_METADATA_SIZE;
         write(fd, &nextEntryOffset, sizeof(nextEntryOffset));
+        pages = 1;
+        write(fd, &pages, sizeof(pages));
     }
 
     void cleanup() {
         lseek(fd, 0, SEEK_SET);
         write(fd, &entries, sizeof(entries));
         write(fd, &nextEntryOffset, sizeof(nextEntryOffset));
+        write(fd, &pages, sizeof(pages));
         close(fd);
     }
 
@@ -40,6 +43,7 @@ public:
             if (lseek(fd, 0, SEEK_SET) == -1) throwError("Failed to seek");
             if (read(fd, &entries, sizeof(entries)) < 1) throwError("Failed to read entries");
             if (read(fd, &nextEntryOffset, sizeof(nextEntryOffset)) < 1) throwError("Failed to read nextEntryOffset");
+            if (read(fd, &pages, sizeof(pages)) < 1) throwError("Failed to read pages");
             return;
         }
         if (errno != ENOENT) return throwError("Failed to open file");
@@ -49,15 +53,23 @@ public:
         initMetadata();
     }
 
-    Value getAll(const CallbackInfo &info) {
+    Value getPages(const CallbackInfo &info) {
         Env env = info.Env();
-        Array result = Array::New(env, entries);
+
+        int firstPage = info[0].As<Number>().Int32Value();
+        if (firstPage >= pages) return env.Null();
+
+        Array result = Array::New(env);
+        if (entries == 0) return result;
+
+        int numberOfPagesToRead = info[1].As<Number>().Int32Value();
+        if (firstPage + numberOfPagesToRead >= pages) numberOfPagesToRead = pages - firstPage;
+
+        if (lseek(fd, (firstPage + 1) * PAGE_SIZE, SEEK_SET) == -1) throwError("Failed to lseek");
 
         int i = 0;
-        int pages = ceil((nextEntryOffset - PAGE_METADATA_SIZE) / (float) PAGE_SIZE) - 1;
         char buffer[PAGE_SIZE];
-        if (lseek(fd, PAGE_SIZE, SEEK_SET) == -1) throwError("Failed to lseek");
-        for (int page = 0; page < pages; page++) {
+        for (int page = 0; page < numberOfPagesToRead; page++) {
             if (read(fd, &buffer, PAGE_SIZE) < 1) throwError("Failed to read");
             uint16_t entries = *((uint16_t *) buffer);
             char *pointer = buffer + PAGE_METADATA_SIZE;
@@ -79,11 +91,10 @@ public:
     void append(const CallbackInfo &info) {
         Array arr = info[0].As<Array>();
 
-        uint32_t page = floor(nextEntryOffset / PAGE_SIZE);
         uint16_t pageOffset = nextEntryOffset % PAGE_SIZE;
         uint16_t pageEntries = 0;
         if (pageOffset > PAGE_METADATA_SIZE)
-            if (pread(fd, &pageEntries, sizeof(pageEntries), page * PAGE_SIZE) < 1) throwError("Failed to pread");
+            if (pread(fd, &pageEntries, sizeof(pageEntries), pages * PAGE_SIZE) < 1) throwError("Failed to pread");
 
         if (lseek(fd, nextEntryOffset, SEEK_SET) == -1) throwError("Failed to lseek");
         for (size_t i = 0; i < arr.Length(); i++) {
@@ -94,9 +105,9 @@ public:
             size_t entrySize = sizeof(id) + sizeof(age) + name.size() + 1;
 
             if (pageOffset + entrySize >= PAGE_SIZE) {
-                if (pwrite(fd, &pageEntries, sizeof(pageEntries), page * PAGE_SIZE) < 1) throwError("Failed to pwrite");
-                page++;
-                if (lseek(fd, page * PAGE_SIZE, SEEK_SET) == -1) throwError("Failed to lseek");
+                if (pwrite(fd, &pageEntries, sizeof(pageEntries), pages * PAGE_SIZE) < 1) throwError("Failed to pwrite");
+                pages++;
+                if (lseek(fd, pages * PAGE_SIZE, SEEK_SET) == -1) throwError("Failed to lseek");
                 pageEntries = 0;
                 if (write(fd, &pageEntries, sizeof(pageEntries)) < 1) throwError("Failed to write");
                 pageOffset = PAGE_METADATA_SIZE;
@@ -110,9 +121,9 @@ public:
             pageOffset += entrySize;
         }
 
-        if (pwrite(fd, &pageEntries, sizeof(pageEntries), page * PAGE_SIZE) < 1) throwError("Failed to pwrite");
+        if (pwrite(fd, &pageEntries, sizeof(pageEntries), pages * PAGE_SIZE) < 1) throwError("Failed to pwrite");
         entries += arr.Length();
-        nextEntryOffset = page * PAGE_SIZE + pageOffset;
+        nextEntryOffset = pages * PAGE_SIZE + pageOffset;
     }
 
     void reset(const CallbackInfo &info) {
@@ -122,7 +133,7 @@ public:
 
     IO(Env env, Object exports) {
         DefineAddon(exports,
-                    {InstanceMethod("init", &IO::init), InstanceMethod("getAll", &IO::getAll), InstanceMethod("append", &IO::append), InstanceMethod("reset", &IO::reset)});
+                    {InstanceMethod("init", &IO::init), InstanceMethod("getPages", &IO::getPages), InstanceMethod("append", &IO::append), InstanceMethod("reset", &IO::reset)});
     }
 };
 
