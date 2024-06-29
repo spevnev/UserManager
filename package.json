@@ -1,11 +1,11 @@
 {
-    "name": "userStorage",
+    "name": "user-storage",
     "version": "1.0.0",
     "gypfile": true,
     "scripts": {
         "dev": "node-gyp build && ts-node test.ts"
     },
-    "license": "ISC",
+    "license": "MIT",
     "devDependencies": {
         "@types/bindings": "^1.5.1",
         "ts-node": "^10.9.1",
